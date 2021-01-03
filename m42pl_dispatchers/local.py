@@ -48,11 +48,11 @@ class TestLocalDispatcher(LocalDispatcher):
 
 
 class ShellLocalDisptcher(LocalDispatcher):
-    '''A dispatcher to be used for local *shell*.
+    """A dispatcher to be used for local *shell*.
 
     This dispatcher append an '| output' command to the pipeline if
     necessary.
-    '''
+    """
     _aliases_ = ['local_shell',]
 
     def __init__(self, context: 'Context'):
@@ -60,7 +60,8 @@ class ShellLocalDisptcher(LocalDispatcher):
     
     async def _run(self, pipeline) -> None:
         output_cmd = m42pl.command('output')
-        if not isinstance(pipeline._commands[-1], output_cmd):
-            pipeline.append_commands([output_cmd(), ])
+        if not len(pipeline.commands) or not isinstance(pipeline.commands[-1], output_cmd):
+            pipeline.commands.append(output_cmd())
+            pipeline.build()
         async for _ in pipeline():
             pass
