@@ -14,7 +14,7 @@ Celery, etc.).
 |---------------|-----------------------|------------|--------------------------------------|--------|
 | `local`       | `LocalDispatcher`     | `local.py` | Run pipelines (single process)       | Alpha  |
 | `local_test`  | `TestLocalDispatcher` | `local.py` | Test pipelines (single process)      | Alpha  |
-| `local_shell` | `ShellLocalDisptcher` | `local.py` | Run pipelines (single process)       | Alpha  |
+| `local_repl`  | `REPLLocalDisptcher`  | `local.py` | Run pipelines (single process)       | Alpha  |
 | `mpi`         | `MPI`                 | `mpi.py`   | Run pipelines on multiples processes | Alpha  |
 
 ## Installation
