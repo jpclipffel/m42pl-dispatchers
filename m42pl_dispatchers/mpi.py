@@ -1,219 +1,206 @@
 import os
+import json
 import multiprocessing
-from multiprocessing import Pipe, Process, get_logger
+from multiprocessing import Process, Queue
 import asyncio
-
-from typing import List, Any
 
 import m42pl
 from m42pl.context import Context
+from m42pl.event import Event
 from m42pl.pipeline import Pipeline
 from m42pl.dispatchers import Dispatcher
 from m42pl.commands import MergingCommand
 
 
-def run_pipeline(pipeline_dc: dict, context_dc: dict, first: bool, last: bool, cin: Any, cout: Any, chunk: int, chunks: int, background: bool, modules_paths: list = [], modules_names: list = []):
-    """Runs a M42PL pipeline.
-    
-    A new command `m42pl_mpi_send` is added to the pipeline before its execution
-    in order to forward its events to the `connection` pipe.
-    
-    :param pipeline_dc:     Serialized pipeline
-    :param context_dc:      Serialized context
-    :param first:           True if first pipeline in a batch, False otherwise
-    :param last:            True if last pipeline in a batch, False otherwise
-    :param cin:             Multiprocessing pipe input (read from)
-    :param cout:            Multiprocessing pipe output (write to)
-    :param chunk:           Instance chunk count
-    :param chunks:          Total number of chunks
-    :param background:      True if the process runs in background, False otherwise
-    :param modules_paths:   Modules to load, specified by path (e.g. `/path/to/module.py`)
-    :param modules_names:   Modules to load, specified by name (e.g. `some.module`)
+# Get number of usable CPUs
+# On Linux, use `os.sched_getaffinity(0)`
+# On other OS, use `os.cpu_count()`
+try:
+    # pylint: disable=no-member
+    MAX_CPUS = len(os.sched_getaffinity(0))
+except Exception:
+    MAX_CPUS = os.cpu_count()
+
+
+def run_pipeline(context: str, event: str, chan_read: Queue,
+                    chan_write: Queue, chunk: int, chunks: int,
+                    modules: dict):
+    """Runs a split pipeline.
+
+    :param context:     Source context as JSON string
+    :param event:       Source event as JSON string
+    :param chan_read:   Multiprocessing queue output (read from);
+    :param chan_write:  Multiprocessing queue input (write to);
+    :param chunk:       Current chunk number (starts at 0)
+    :param chunks:      Total number of chunks (i.e. number of parallel
+                        split pipelines / process)
+    :param modules:     Modules names and paths to load
     """
 
-    async def _run(pipeline) -> None:
-        async for _ in pipeline():
-            pass
+    async def run(pipeline, context, event):
+        async with context.kvstore:
+            async for _ in pipeline(context, event):
+                pass
 
-    if background and os.fork() != 0:
-        return
-    # Load requested modules.
-    m42pl.load_modules(paths=modules_paths, names=modules_names)
-    # Build local context from serialized context
-    context = Context.from_dict(context_dc)
-    # Build local pipeline from serialized pipeline
-    pipeline = Pipeline.from_dict(pipeline_dc)
-    # Setup pipeline start and end commands
-    if not first:
-        pipeline.prepend_commands([ m42pl.command('m42pl_mpi_receive')(cin), ])
-    if not last:
-        pipeline.append_commands([ m42pl.command("m42pl_mpi_send")(cout), ])
-    # Setup pipeline chunks
+    # Load missing modules
+    m42pl.load_modules(names=modules['names'], paths=modules['paths'])
+    # Build local context and event from seralized instances
+    context = Context.from_dict(json.loads(context))
+    event = Event.from_dict(json.loads(event))
+    # Get main pipeline
+    pipeline = context.pipelines['main']
+    # ---
+    # Customize main pipeline to read & write to the multiprocessing pipe
+    # Intermediate or last command: read input from MPI pipe
+    if chan_read:
+        pipeline.commands = [
+            m42pl.command('mpi-receive')(chan_read),
+        ] + pipeline.commands
+    # First or intermediate command: write output to MPI pipe
+    if chan_write:
+        pipeline.commands.append(m42pl.command('mpi-send')(chan_write))
+    # ---
+    # Rebuild, reconfigure and run pipeline
+    pipeline.build()
     pipeline.set_chunk(chunk, chunks)
-    # Setup pipeline context
-    pipeline.context = context
-    # Run pipeline
-    asyncio.run(_run(pipeline))
+    asyncio.run(run(pipeline, context, event))
 
 
 class MPI(Dispatcher):
     """Run pipelines in mutliple parallels processes (**not** threads).
+
+    This dispatcher is not recomended for REPL application (although
+    functionnal) as it `fork()` each time is is called.
+
+    TODO: Create a variant (e.g. `REPLMPI`) which will be more suitable
+    for REPL application.
+
+    :ivar processes:    List of pipelines processes
+    :ivar modules:      M42PL modules paths and names
     """
 
     _aliases_ = ['multiprocessing', 'mpi']
 
-    def __init__(self, context: Context, background: bool = False, max_cpus: int = 0, method: str = None) -> None:
+    def __init__(self, background: bool = False, max_cpus: int = 0,
+                    method: str = None, *args, **kwargs):
         """
-        :param context:     M42PL context.
         :param background:  True if the processes must be detached,
-                            False otherwise. Defaults to False.
-        :param max_cpus:    Maximum number of CPU to use.
-                            The effective number of parallel pipeline
-                            is `max_cpus - 1` since a default process
-                            is spawned to gather events. Defaults to
-                            `multiprocessing.cpu_count() - 1`.
+                            False otherwise. Defaults to False
+        :param max_cpus:    Maximum number of CPU to use; Defaults to
+                            number of CPU
         :param method:      Multiprocessing start method (`fork`,
-                            `forkserver` or `spawn`).
-                            If `None`, use default start method.
-                            Defaults to `None`.
+                            `forkserver` or `spawn`);
+                            If `None`, use default start method;
+                            Defaults to `None`
         """
-        super().__init__(context)
+        super().__init__(*args, **kwargs)
         self.background = background
-        self.max_cpus = max_cpus > 0 and max_cpus or multiprocessing.cpu_count()
-        if method:
+        self.max_cpus = max_cpus or MAX_CPUS
+        self.method = method
+        if self.method:
             multiprocessing.set_start_method(method.lower())
         self.processes = []
-        self.pids = [] # type: List[int]
-        # ---
-        # Support for all multiprocessing start methods
-        #
         # When using 'spwan' and 'forkserver', dynamically loaded
         # modules (by path or name) are not copied to the new Python
         # process. We need to reload them in the new processes.
         if multiprocessing.get_start_method() != 'fork':
-            modules_refs = {
-                'modules_paths': m42pl.IMPORTED_MODULES_PATHS,
-                'modules_names': m42pl.IMPORTED_MODULES_NAMES
+            self.modules = {
+                'paths': m42pl.IMPORTED_MODULES_PATHS,
+                'names': m42pl.IMPORTED_MODULES_NAMES
             }
         else:
-            modules_refs = {}
+            self.modules = {
+                'paths': [],
+                'names': []
+            }
 
+    def split_pipeline(self, pipeline: Pipeline,
+                        max_layers: int = 2) -> list[Pipeline]:
+        """Splits the :param:`pipeline` by command type.
 
-        _, main_pipeline = list(self.context.pipelines.items())[-1]
-        
+        The source :param:`pipeline` is split in :param:`max_layers`
+        layers at most.
+        Each layer have a subset of the original commands.
+        The source :param:`pipeline` commands list is split at each
+        command of type `MergingCommand` (exclusive).
 
-        pipelines = main_pipeline.split_by_type(
-            cmd_type=MergingCommand,
-            cmd_single=False
-        )
-        
-        for i, pipeline in enumerate(pipelines):
-            for cpu_count in range(1, self.max_cpus + 1):
+        :param pipeline:    Source pipeline
+        :param max_layers:  Maxiumum number of layers; Default to 2
+                            (one for pre-merging commands and one for 
+                            merging and post-merging commands)
+        """
+        commands = [[],]
+        pipelines = []
+        # Build the new pipelines' commands lists
+        for cmd in pipeline.commands:
+            # Split when the command type is a `MergingCommand`
+            if isinstance(cmd, MergingCommand) and len(commands) < max_layers:
+                commands.append([cmd,])
+            # Append non-merging command to current commands list
+            else:
+                commands[-1].append(cmd)
+        # Build and returns new pipelines
+        for cmds in commands:
+            pipelines.append(Pipeline(
+                commands=cmds,
+                name=f'{pipeline.name}',
+                timeout=pipeline.timeout,
+            ))
+        return pipelines
 
-                if i == 0:
-                    cin, cout = multiprocessing.Pipe()
-                else:
-                    cin = cout
-                    cout, cin = multiprocessing.Pipe()
-
+    def target(self, context, event):
+        # ---
+        # Get main pipeline
+        main_pipeline = context.pipelines['main']
+        # ---
+        # Split main pipeline
+        layers = self.split_pipeline(main_pipeline)
+        # ---
+        # Create processes
+        for layer, pipeline in enumerate(layers):
+            # Setup channels for first layer
+            if layer == 0:
+                chan_read = None
+                chan_write = Queue()
+            # Setup channels for intermediate layer
+            elif layer > 0 and layer < (len(layers) - 1):
+                chan_read = chan_write
+                chan_write = Queue()
+            # Setup channels for last layer
+            else:
+                chan_read = chan_write
+                chan_write = None
+            # Setup chunks count
+            # `chunks` is the number of parallels pipelines to run.
+            # If the `pipeline_count` is:
+            # * even : non-merging pipeline => dispatch on `max_cpu` processes
+            # * non-even : merging pipeline => dispatch on a single process
+            chunks = layer % 2 == 0 and self.max_cpus or 1
+            # Amend context
+            context.pipelines['main'] = pipeline
+            # Setup layer's processes
+            for chunk in range(0, chunks):
                 self.processes.append(Process(
-                    target=run_pipeline,42
+                    target=run_pipeline,
                     kwargs={
-                        **{
-                            'pipeline_dc': pipeline.to_dict(),
-                            'context_dc': context.to_dict(),
-                            'first': i == 0,
-                            'last': i == len(pipelines) - 1,
-                            'cin': i == 0 and None or cin,
-                            'cout': i == len(pipelines) - 1 and cout or None,
-                            'chunk': cpu_count,
-                            'chunks': self.max_cpus,
-                            'background': self.background
-                       },
-                        **modules_refs
+                        'context': json.dumps(context.to_dict()),
+                        'event': json.dumps(event.to_dict()),
+                        'chan_read': chan_read,
+                        'chan_write': chan_write,
+                        'chunk': chunk,
+                        'chunks': chunks,
+                        'modules': self.modules
                     }
                 ))
-
-
-
-
-
-
-        # print(sub_pipelines)
-
-        # pipes = []
-        # for i, pipeline in enumerate(pipelines):
-        #     if not len(pipes):
-        #         pipes = list(multiprocessing.Pipe())
-        #         # cin, cout = multiprocessing.Pipe()
-        #     for cpu_count in range(0, self.max_cpus):
-        #         self.processes.append(Process(
-        #             target=run_pipeline,
-        #             kwargs={
-        #                 **{
-        #                     'js': pipeline.to_dict(),
-        #                     'first': i == 0,
-        #                     'last': i == len(pipelines) - 1,
-        #                     'cin': i == 0 and None or pipes.pop(),
-        #                     'cout': i == len(pipelines) - 1 and None or pipes.pop(),
-        #                     'chunk': cpu_count + 1,
-        #                     'chunks': max_cpus,
-        #                     'background': self.background
-        #                 },
-        #                 **modules_refs
-        #             }
-        #         ))
-        # # ---
-        # # Prepare processes
-        # for i, pipeline in enumerate(pipelines):
-        #     for cpu_count in range(0, self.max_cpus):
-        #         self.processes.append(Process(
-        #             target=run_pipeline,
-        #             kwargs={
-        #                 **{
-        #                     'js': pipeline.to_dict(),
-        #                     'first': i == 0,
-        #                     'last': i == len(pipelines) - 1,
-        #                     'cin': cin,
-        #                     'cout': cout,
-        #                     'chunk': cpu_count + 1,
-        #                     'chunks': max_cpus,
-        #                     'background': self.background
-        #                 }, **modules_refs}
-        #         )) 
-
-
-        # # ---
-        # # Setup paralel pipelines processes.
-        # main_pipeline = pipeline.split_from()
-        # for cpu_count in range(0, self.max_cpus):
-        #     self.processes.append(
-        #         Process(target=run_main_pipeline, kwargs={
-        #             **{
-        #                 "js": pipeline.to_dict(),
-        #                 "connection": cnx_out,
-        #                 "chunk": cpu_count + 1,
-        #                 "chunks": max_cpus,
-        #                 "background": self.background
-        #             }, **modules_refs}))
-        # # ---
-        # # Setup gathering process.
-        # self.processes.append(
-        #     Process(target=run_terminal_pipeline, kwargs={
-        #         **{
-        #             "connection": cnx_in,
-        #             "background": self.background
-        #         }, **modules_refs}))
-
-    def to_dict(self):
-        return {'pids': self.pids}
-
-    def __call__(self):
+        # ---
+        # Start processes
         for process in self.processes:
             process.start()
-        self.pids = [ p.pid for p in self.processes ]
-        if not self.background:
-            for process in self.processes:
-                process.join()
-        else:
-            return self.pids
+        # ---
+        # Join processes
+        for process in self.processes:
+            process.join()
+            print(f'terminated: {process}')
+        # ---
+        # Cleanup
+        self.processes = []
