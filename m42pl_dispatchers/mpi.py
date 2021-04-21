@@ -57,8 +57,8 @@ def run_pipeline(pipeline_dc: dict, context_dc: dict, first: bool, last: bool, c
 
 
 class MPI(Dispatcher):
-    '''Run pipelines in mutliple parallels processes (**not** threads).
-    '''
+    """Run pipelines in mutliple parallels processes (**not** threads).
+    """
 
     _aliases_ = ['multiprocessing', 'mpi']
 
@@ -117,7 +117,7 @@ class MPI(Dispatcher):
                     cout, cin = multiprocessing.Pipe()
 
                 self.processes.append(Process(
-                    target=run_pipeline,
+                    target=run_pipeline,42
                     kwargs={
                         **{
                             'pipeline_dc': pipeline.to_dict(),

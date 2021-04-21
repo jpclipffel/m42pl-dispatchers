@@ -1,67 +1,87 @@
+import os
 import asyncio
+from pathlib import Path
 
 from m42pl.dispatchers import Dispatcher
-from m42pl.utils.time import now
-import m42pl
+import m42pl.errors
 
 
 class LocalDispatcher(Dispatcher):
-    """Run pipeline locally.
+    """Runs pipelines in a single thread.
     """
+
     _aliases_ = ['local',]
 
-    def __init__(self, context: 'Context') -> None:
-        super().__init__(context)
+    def __init__(self, workdir: str = '.', *args, **kwargs) -> None:
+        """
+        :param optioanl workdir:    Working directory
+        """
+        super().__init__(*args, **kwargs)
+        self.workdir = Path(workdir)
+        if not self.workdir.is_dir():
+            raise m42pl.errors.DispatcherError(
+                self, 
+                f'Requested workdir does not exists: workdir="{workdir}"'
+            )
 
-    async def _run(self, pipeline) -> None:
-        async for _ in pipeline():
-            pass
+    async def _run(self, context, event) -> None:
+        """Run the context's main pipeline.
+        """
+        async with context.kvstore:
+            pipeline = context.pipelines['main']
+            async for _ in pipeline(context, event):
+                pass
 
-    def __call__(self):
-        _, pipeline = list(self.context.pipelines.items())[-1]
-        asyncio.run(self._run(pipeline))
+    def target(self, context, event):
+        os.chdir(self.workdir)
+        asyncio.run(self._run(context, event))
 
 
 class TestLocalDispatcher(LocalDispatcher):
-    '''A dispatcher to be used for local tests.
+    """A dispatcher to be used for local tests.
 
     This dispatcher stores the pipeline results in a list and
-    returns this list atfer the pipeline execution. This is not
-    suitable for never-ending pipelines, which will of course
-    saturate the memory.
-    '''
+    returns this list atfer the pipeline execution.
+    
+    **This dispatcher is not suitable for never-ending pipelines** as
+    it may overfill the memory.
+    """
+
     _aliases_ = ['local_test',]
 
-    def __init__(self, context: 'Context'):
-        super().__init__(context)
-        self.results = []
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-    async def _run(self, pipeline) -> list:
+    async def _run(self, context, event) -> list:
         self.results = []
-        async for event in pipeline():
-            self.results.append(event)
-        return self.results
+        pipeline = context.main_pipeline()
+        with context.kvstore:
+            async for _event in pipeline(context, event):
+                self.results.append(_event)
     
-    def __call__(self):
-        super().__call__()
+    def target(self, context, event) -> list:
+        super().target(context, event)
         return self.results
 
 
-class ShellLocalDisptcher(LocalDispatcher):
-    """A dispatcher to be used for local *shell*.
+class REPLLocalDisptcher(LocalDispatcher):
+    """Runs pipelines in a single thread.
 
-    This dispatcher append an '| output' command to the pipeline if
+    This dispatcher append an 'output' command to the pipeline if
     necessary.
     """
-    _aliases_ = ['local_shell',]
 
-    def __init__(self, context: 'Context'):
-        super().__init__(context)
+    _aliases_ = ['local_repl',]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.output_cmd = m42pl.command('output')
     
-    async def _run(self, pipeline) -> None:
-        output_cmd = m42pl.command('output')
-        if not len(pipeline.commands) or not isinstance(pipeline.commands[-1], output_cmd):
-            pipeline.commands.append(output_cmd())
+    def target(self, context, event):
+        pipeline = context.pipelines['main']
+        # Add a trailing output command if necessary
+        if not len(pipeline.commands) or not isinstance(pipeline.commands[-1], self.output_cmd):
+            pipeline.commands.append(self.output_cmd())
             pipeline.build()
-        async for _ in pipeline():
-            pass
+        # Continue
+        return super().target(context, event)
