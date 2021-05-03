@@ -4,6 +4,8 @@ import multiprocessing
 from multiprocessing import Process, Queue
 import asyncio
 
+from typing import List
+
 import m42pl
 from m42pl.context import Context
 from m42pl.event import Event
@@ -115,7 +117,7 @@ class MPI(Dispatcher):
             }
 
     def split_pipeline(self, pipeline: Pipeline,
-                        max_layers: int = 2) -> list[Pipeline]:
+                        max_layers: int = 2) -> List[Pipeline]:
         """Splits the :param:`pipeline` by command type.
 
         The source :param:`pipeline` is split in :param:`max_layers`
