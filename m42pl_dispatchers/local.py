@@ -7,25 +7,33 @@ import m42pl.errors
 
 
 class LocalDispatcher(Dispatcher):
-    """Runs pipelines in a single thread.
+    """Runs pipelines in the current process.
     """
 
     _aliases_ = ['local',]
 
-    def __init__(self, workdir: str = '.', *args, **kwargs) -> None:
+    def __init__(self, workdir: str = '.', uv: bool = False,
+                    *args, **kwargs) -> None:
         """
-        :param optioanl workdir:    Working directory
+        :param workdir:     Working directory
+        :param uv:          Use uvloop or not; Default to `False`
         """
         super().__init__(*args, **kwargs)
         self.workdir = Path(workdir)
+        self.use_uv = uv
+        # ---
         if not self.workdir.is_dir():
             raise m42pl.errors.DispatcherError(
                 self, 
                 f'Requested workdir does not exists: workdir="{workdir}"'
             )
+        if self.use_uv:
+            import uvloop
+            uvloop.install()
+            self.logger.info('installed uvloop')
 
     async def _run(self, context, event) -> None:
-        """Run the context's main pipeline.
+        """Run the context main pipeline.
         """
         async with context.kvstore:
             pipeline = context.pipelines['main']
@@ -54,8 +62,8 @@ class TestLocalDispatcher(LocalDispatcher):
 
     async def _run(self, context, event) -> list:
         self.results = []
-        pipeline = context.main_pipeline()
-        with context.kvstore:
+        pipeline = context.pipelines['main']
+        async with context.kvstore:
             async for _event in pipeline(context, event):
                 self.results.append(_event)
     
