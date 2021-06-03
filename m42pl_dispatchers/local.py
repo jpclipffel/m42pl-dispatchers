@@ -17,6 +17,7 @@ class LocalDispatcher(Dispatcher):
         """
         :param workdir:     Working directory
         :param uv:          Use uvloop or not; Default to `False`
+        :param timeout:     Pipeline's timeout
         """
         super().__init__(*args, **kwargs)
         self.workdir = Path(workdir)
