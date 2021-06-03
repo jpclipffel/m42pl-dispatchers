@@ -146,7 +146,7 @@ class MPI(Dispatcher):
             pipelines.append(Pipeline(
                 commands=cmds,
                 name=f'{pipeline.name}',
-                timeout=pipeline.timeout,
+                # timeout=pipeline.timeout,
             ))
         return pipelines
 
