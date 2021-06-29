@@ -2,11 +2,8 @@
 
 Core [M42PL] dispatchers.
 
-## What are M42PL dispatchers ?
-
-M42PL dispatchers executes M42PL pipelines. They are the glue between
-a pipeline and an execution framework (single process, multiple processes,
-Celery, etc.).
+M42PL dispatchers runs M42PL pipelines. They are the glue between a pipeline
+and an execution framework (single process, multiple processes, Celery, etc.).
 
 ## Dispatchers list
 

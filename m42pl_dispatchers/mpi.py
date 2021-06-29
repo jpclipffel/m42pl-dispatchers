@@ -8,7 +8,6 @@ from typing import List
 
 import m42pl
 from m42pl.context import Context
-from m42pl.event import Event
 from m42pl.pipeline import Pipeline
 from m42pl.dispatchers import Dispatcher
 from m42pl.commands import MergingCommand
@@ -48,7 +47,8 @@ def run_pipeline(context: str, event: str, chan_read: Queue,
     m42pl.load_modules(names=modules['names'], paths=modules['paths'])
     # Build local context and event from seralized instances
     context = Context.from_dict(json.loads(context))
-    event = Event.from_dict(json.loads(event))
+    # event = Event.from_dict(json.loads(event))
+    event = json.loads(event)
     # Get main pipeline
     pipeline = context.pipelines['main']
     # ---
@@ -186,7 +186,8 @@ class MPI(Dispatcher):
                     target=run_pipeline,
                     kwargs={
                         'context': json.dumps(context.to_dict()),
-                        'event': json.dumps(event.to_dict()),
+                        # 'event': json.dumps(event.to_dict()),
+                        'event': json.dumps(event),
                         'chan_read': chan_read,
                         'chan_write': chan_write,
                         'chunk': chunk,
