@@ -72,7 +72,7 @@ class MPI(Dispatcher):
     """Run pipelines in mutliple parallels processes (**not** threads).
 
     This dispatcher is not recomended for REPL application (although
-    functionnal) as it `fork()` each time is is called.
+    functionnal) as it `fork()` each time it is called.
 
     TODO: Create a variant (e.g. `REPLMPI`) which will be more suitable
     for REPL application.
@@ -120,14 +120,11 @@ class MPI(Dispatcher):
                         max_layers: int = 2) -> List[Pipeline]:
         """Splits the :param:`pipeline` by command type.
 
-        The source :param:`pipeline` is split in :param:`max_layers`
-        layers at most.
-        Each layer have a subset of the original commands.
-        The source :param:`pipeline` commands list is split at each
-        command of type `MergingCommand` (exclusive).
+        The source :param:`pipeline` is split at each merging command
+        and in at most :param:`max_layers` layers.
 
         :param pipeline:    Source pipeline
-        :param max_layers:  Maxiumum number of layers; Default to 2
+        :param max_layers:  Maximum number of layers; Default to 2
                             (one for pre-merging commands and one for 
                             merging and post-merging commands)
         """
@@ -203,7 +200,6 @@ class MPI(Dispatcher):
         # Join processes
         for process in self.processes:
             process.join()
-            print(f'terminated: {process}')
         # ---
         # Cleanup
         self.processes = []
