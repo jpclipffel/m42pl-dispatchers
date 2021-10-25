@@ -7,12 +7,13 @@ and an execution framework (single process, multiple processes, Celery, etc.).
 
 ## Dispatchers list
 
-| Aliases       | Class                 | Module     | Description                          |
-|---------------|-----------------------|------------|--------------------------------------|
-| `local`       | `LocalDispatcher`     | `local.py` | Run pipelines (single process)       |
-| `local_test`  | `TestLocalDispatcher` | `local.py` | Test pipelines (single process)      |
-| `local_repl`  | `REPLLocalDisptcher`  | `local.py` | Run pipelines (single process)       |
-| `mpi`         | `MPI`                 | `mpi.py`   | Run pipelines on multiples processes |
+| Aliases          | Class                   | Module     | Description                          |
+|------------------|-------------------------|------------|--------------------------------------|
+| `local`          | `LocalDispatcher`       | `local.py` | Run a pipeline                       |
+| `local_test`     | `TestLocalDispatcher`   | `local.py` | Test a pipeline                      |
+| `local_repl`     | `REPLLocalDisptcher`    | `local.py` | Run a pipeline                       |
+| `local_detached` | `DetachedLocalDispater` | `local.py` | Run a pipeline in another process    |
+| `mpi`            | `MPI`                   | `mpi.py`   | Run pipelines on multiples processes |
 
 ## Installation
 

@@ -7,5 +7,8 @@ setup(
   url='https://github.com/jpclipffel/m42pl-dispatchers',
   version='1.0.0',
   packages=['m42pl_dispatchers', ],
-  install_requires=['m42pl-commands', ]
+  install_requires=[
+      'dill',
+      'm42pl-commands',
+    ]
 )

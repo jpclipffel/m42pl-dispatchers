@@ -1,9 +1,16 @@
+from __future__ import annotations
+
 import os
 import asyncio
 from pathlib import Path
+import multiprocessing
+# from pathos.multiprocessing import ProcessPool
+import dill
 
 from m42pl.dispatchers import Dispatcher
 import m42pl.errors
+
+from m42pl.encoders import ALIASES as encoders_aliases
 
 
 class LocalDispatcher(Dispatcher):
@@ -37,9 +44,19 @@ class LocalDispatcher(Dispatcher):
         """Run the context main pipeline.
         """
         async with context.kvstore:
-            pipeline = context.pipelines['main']
-            async for _ in pipeline(context, event):
-                pass
+            # Write pipeline / process ID to KVStore
+            await self.register(context.kvstore, os.getpid())
+            # Select and run pipeline
+            try:
+                pipeline = context.pipelines['main']
+                async for _ in pipeline(context, event):
+                    pass
+            except (Exception, StopAsyncIteration):
+                # Remove pipeline / process ID from KVStore
+                await self.unregister(context.kvstore, os.getpid())
+                raise
+            # Remove pipeline / process ID from KVStore
+            await self.unregister(context.kvstore, os.getpid())
 
     def target(self, context, event):
         os.chdir(self.workdir)
@@ -94,3 +111,43 @@ class REPLLocalDisptcher(LocalDispatcher):
             pipeline.build()
         # Continue
         return super().target(context, event)
+
+
+class DetachedLocalDispater(LocalDispatcher):
+    """Runs pipelines in a single, detached process.
+
+    This dispather works as a ``LocalDispatcher`` but runs in
+    background in detached mode: the calling process (e.g. M42PL main)
+    will return before the pipeline has ran.
+    """
+    
+    _aliases_ = ['local_detached',]
+
+    def _detached_target(self, *args):
+        context = dill.loads(args[0])
+        event = dill.loads(args[1])
+        if os.fork() != 0:
+            return
+        # Patch dynamically imported modules
+        setattr(m42pl.encoders, 'ALIASES', dill.loads(args[2]))
+        super().target(context, event)
+
+    def target(self, context, event):
+        detached = multiprocessing.Process(
+            target=self._detached_target,
+            args=(
+                dill.dumps(context),
+                dill.dumps(event),
+                dill.dumps(encoders_aliases)
+            )
+        )
+        detached.daemon = True
+        detached.start()
+        detached.join()
+
+    def status(self, identifier: int|str):
+        try:
+            os.kill(int(identifier), 0)
+        except ProcessLookupError:
+            return self.State.UNKNOWN
+        return self.State.RUNNING
