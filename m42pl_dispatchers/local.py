@@ -6,6 +6,7 @@ from pathlib import Path
 import multiprocessing
 # from pathos.multiprocessing import ProcessPool
 import dill
+import psutil
 
 from m42pl.dispatchers import Dispatcher
 import m42pl.errors
@@ -126,13 +127,17 @@ class DetachedLocalDispater(LocalDispatcher):
     def _detached_target(self, *args):
         context = dill.loads(args[0])
         event = dill.loads(args[1])
-        if os.fork() != 0:
-            return
+        # if os.fork() != 0:
+        #     return
         # Patch dynamically imported modules
         setattr(m42pl.encoders, 'ALIASES', dill.loads(args[2]))
         super().target(context, event)
 
-    def target(self, context, event):
+    def target(self, context, event) -> int:
+        """Runs the pipeline in a new process.
+
+        :returns:   New process PID
+        """
         detached = multiprocessing.Process(
             target=self._detached_target,
             args=(
@@ -143,11 +148,20 @@ class DetachedLocalDispater(LocalDispatcher):
         )
         detached.daemon = True
         detached.start()
-        detached.join()
+        # detached.join()
+        # print(detached)
+        # print(dir(detached))
+        return detached.pid
 
-    def status(self, identifier: int|str):
+    async def status(self, identifier: int|str) -> Dispatcher.State:
         try:
-            os.kill(int(identifier), 0)
-        except ProcessLookupError:
-            return self.State.UNKNOWN
-        return self.State.RUNNING
+            status = psutil.Process(int(identifier)).status()
+            return {
+                psutil.STATUS_RUNNING: self.State.RUNNING,
+            }.get(status, self.State.UNKNOWN)
+        except Exception:
+            pass
+        return self.State.UNKNOWN
+
+    async def status_str(self, identifier: int|str) -> Dispatcher.State:
+        return (await self.status(identifier)).name
