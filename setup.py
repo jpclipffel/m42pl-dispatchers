@@ -9,6 +9,7 @@ setup(
   packages=['m42pl_dispatchers', ],
   install_requires=[
       'dill',
+      'psutil',
       'm42pl-commands',
     ]
 )
