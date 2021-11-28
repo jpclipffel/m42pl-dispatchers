@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import multiprocessing
 from multiprocessing import Process, Queue
@@ -21,6 +22,15 @@ try:
     MAX_CPUS = len(os.sched_getaffinity(0))
 except Exception:
     MAX_CPUS = os.cpu_count()
+
+
+class DevNull:
+    def write(self, *args, **kwargs):
+        pass
+
+    def flush(self, *args, **kwargs):
+        pass
+
 
 
 def run_pipeline(context: str, event: str, chan_read: Queue,
@@ -62,9 +72,14 @@ def run_pipeline(context: str, event: str, chan_read: Queue,
     if chan_write:
         pipeline.commands.append(m42pl.command('mpi-send')(chan_write))
     # ---
-    # Rebuild, reconfigure and run pipeline
+    # Rebuild and reconfigure pipeline
     pipeline.build()
     pipeline.set_chunk(chunk, chunks)
+    # ---
+    # Close stdout and run
+    if chan_write is not None:
+        sys.stdout = DevNull()
+        sys.stderr = DevNull()
     asyncio.run(run(pipeline, context, event))
 
 
