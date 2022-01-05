@@ -8,6 +8,7 @@ import multiprocessing
 import dill
 import psutil
 
+from m42pl.pipeline import PipelineRunner
 from m42pl.dispatchers import Dispatcher
 import m42pl.errors
 
@@ -40,24 +41,36 @@ class LocalDispatcher(Dispatcher):
             import uvloop
             uvloop.install()
             self.logger.info('installed uvloop')
+        # ---
+        self.current_kvstore = None
+        self.current_identifier = None
+
+    async def __aexit__(self, *args, **kwargs):
+        await self.unregister(self.current_kvstore, self.current_identifier)
 
     async def _run(self, context, event) -> None:
         """Run the context main pipeline.
         """
         async with context.kvstore:
-            # Write pipeline / process ID to KVStore
-            await self.register(context.kvstore, os.getpid())
-            # Select and run pipeline
-            try:
+            async with self:
+                self.current_kvstore = context.kvstore
+                self.current_identifier = os.getpid()
+                # Write pipeline / process ID to KVStore
+                # await self.register(context.kvstore, os.getpid())
+                await self.register(self.current_kvstore, self.current_identifier)
+                # Select and run pipeline
+                # try:
                 pipeline = context.pipelines['main']
-                async for _ in pipeline(context, event):
+                runner = PipelineRunner(pipeline)
+                # async for _ in pipeline(context, event):
+                async for _ in runner(context, event):
                     pass
-            except (Exception, StopAsyncIteration):
-                # Remove pipeline / process ID from KVStore
-                await self.unregister(context.kvstore, os.getpid())
-                raise
-            # Remove pipeline / process ID from KVStore
-            await self.unregister(context.kvstore, os.getpid())
+                # except (Exception, StopAsyncIteration):
+                #     # Remove pipeline / process ID from KVStore
+                #     await self.unregister(context.kvstore, os.getpid())
+                #     raise
+                # # Remove pipeline / process ID from KVStore
+                # await self.unregister(context.kvstore, os.getpid())
 
     def target(self, context, event):
         os.chdir(self.workdir)
@@ -82,8 +95,9 @@ class TestLocalDispatcher(LocalDispatcher):
     async def _run(self, context, event) -> list:
         self.results = []
         pipeline = context.pipelines['main']
+        runner = PipelineRunner(pipeline)
         async with context.kvstore:
-            async for _event in pipeline(context, event):
+            async for _event in runner(context, event):
                 self.results.append(_event)
     
     def target(self, context, event) -> list:
@@ -91,7 +105,7 @@ class TestLocalDispatcher(LocalDispatcher):
         return self.results
 
 
-class REPLLocalDisptcher(LocalDispatcher):
+class REPLLocalDispatcher(LocalDispatcher):
     """Runs pipelines in a single thread.
 
     This dispatcher append an 'output' command to the pipeline if
@@ -114,7 +128,7 @@ class REPLLocalDisptcher(LocalDispatcher):
         return super().target(context, event)
 
 
-class DetachedLocalDispater(LocalDispatcher):
+class DetachedLocalDispatcher(LocalDispatcher):
     """Runs pipelines in a single, detached process.
 
     This dispather works as a ``LocalDispatcher`` but runs in
