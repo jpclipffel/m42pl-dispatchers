@@ -167,15 +167,15 @@ class DetachedLocalDispatcher(LocalDispatcher):
         # print(dir(detached))
         return detached.pid
 
-    async def status(self, identifier: int|str) -> Dispatcher.State:
-        try:
-            status = psutil.Process(int(identifier)).status()
-            return {
-                psutil.STATUS_RUNNING: self.State.RUNNING,
-            }.get(status, self.State.UNKNOWN)
-        except Exception:
-            pass
-        return self.State.UNKNOWN
+    # async def status(self, identifier: int|str) -> Dispatcher.State:
+    #     try:
+    #         status = psutil.Process(int(identifier)).status()
+    #         return {
+    #             psutil.STATUS_RUNNING: self.State.RUNNING,
+    #         }.get(status, self.State.UNKNOWN)
+    #     except Exception:
+    #         pass
+    #     return self.State.UNKNOWN
 
-    async def status_str(self, identifier: int|str) -> Dispatcher.State:
-        return (await self.status(identifier)).name
+    # async def status_str(self, identifier: int|str) -> Dispatcher.State:
+    #     return (await self.status(identifier)).name
