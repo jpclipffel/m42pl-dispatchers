@@ -24,9 +24,9 @@ class LocalDispatcher(Dispatcher):
     def __init__(self, workdir: str = '.', uv: bool = False,
                     *args, **kwargs) -> None:
         """
-        :param workdir:     Working directory
-        :param uv:          Use uvloop or not; Default to `False`
-        :param timeout:     Pipeline's timeout
+        :param workdir: Working directory
+        :param uv: Set to ``True`` to use ``uvloop``
+        :param timeout: Pipeline's timeout
         """
         super().__init__(*args, **kwargs)
         self.workdir = Path(workdir)
@@ -72,10 +72,15 @@ class LocalDispatcher(Dispatcher):
                 # # Remove pipeline / process ID from KVStore
                 # await self.unregister(context.kvstore, os.getpid())
 
-    def target(self, context, event):
-        os.chdir(self.workdir)
-        asyncio.run(self._run(context, event))
-
+    def target(self, context, event, plan):
+        # Plan
+        self.plan.add_layer('L0')
+        for command in context.pipelines['main'].commands:
+            self.plan.add_step(command._aliases_[0])
+        # Run
+        if not plan:
+            os.chdir(self.workdir)
+            asyncio.run(self._run(context, event))
 
 class TestLocalDispatcher(LocalDispatcher):
     """A dispatcher to be used for local tests.
@@ -100,8 +105,8 @@ class TestLocalDispatcher(LocalDispatcher):
             async for _event in runner(context, event):
                 self.results.append(_event)
     
-    def target(self, context, event) -> list:
-        super().target(context, event)
+    def target(self, context, event, plan) -> list:
+        super().target(context, event, plan)
         return self.results
 
 
@@ -118,14 +123,14 @@ class REPLLocalDispatcher(LocalDispatcher):
         super().__init__(*args, **kwargs)
         self.output_cmd = m42pl.command('output')
     
-    def target(self, context, event):
+    def target(self, context, event, plan):
         pipeline = context.pipelines['main']
         # Add a trailing output command if necessary
         if not len(pipeline.commands) or not isinstance(pipeline.commands[-1], self.output_cmd):
             pipeline.commands.append(self.output_cmd())
             pipeline.build()
         # Continue
-        return super().target(context, event)
+        return super().target(context, event, plan)
 
 
 class DetachedLocalDispatcher(LocalDispatcher):
@@ -147,7 +152,7 @@ class DetachedLocalDispatcher(LocalDispatcher):
         setattr(m42pl.encoders, 'ALIASES', dill.loads(args[2]))
         super().target(context, event)
 
-    def target(self, context, event) -> int:
+    def target(self, context, event, plan) -> int:
         """Runs the pipeline in a new process.
 
         :returns:   New process PID
