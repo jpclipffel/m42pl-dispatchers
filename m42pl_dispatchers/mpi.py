@@ -2,15 +2,15 @@ import os
 import sys
 import json
 import multiprocessing
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Pipe
 import asyncio
 
 from typing import List
 
 import m42pl
 from m42pl.context import Context
-from m42pl.pipeline import Pipeline
-from m42pl.dispatchers import Dispatcher
+from m42pl.pipeline import Pipeline, PipelineRunner
+from m42pl.dispatchers import Dispatcher, Plan
 from m42pl.commands import MergingCommand
 
 
@@ -38,19 +38,21 @@ def run_pipeline(context: str, event: str, chan_read: Queue,
                     modules: dict):
     """Runs a split pipeline.
 
-    :param context:     Source context as JSON string
-    :param event:       Source event as JSON string
-    :param chan_read:   Multiprocessing queue output (read from);
-    :param chan_write:  Multiprocessing queue input (write to);
-    :param chunk:       Current chunk number (starts at 0)
-    :param chunks:      Total number of chunks (i.e. number of parallel
-                        split pipelines / process)
-    :param modules:     Modules names and paths to load
+    :param context: Source context as JSON string
+    :param event: Source event as JSON string
+    :param chan_read: Multiprocessing queue output (read from);
+    :param chan_write: Multiprocessing queue input (write to);
+    :param chunk: Current chunk number (starts at 0)
+    :param chunks: Total number of chunks (i.e. number of parallel
+        pipelines / processes)
+    :param modules: Modules names and paths to load
+    :param plan: Plan pipeline execution only
     """
 
     async def run(pipeline, context, event):
         async with context.kvstore:
-            async for _ in pipeline(context, event):
+            runner = PipelineRunner(pipeline)
+            async for _ in runner(context, event):
                 pass
 
     # Load missing modules
@@ -61,7 +63,6 @@ def run_pipeline(context: str, event: str, chan_read: Queue,
     event = json.loads(event)
     # Get main pipeline
     pipeline = context.pipelines['main']
-    # ---
     # Customize main pipeline to read & write to the multiprocessing pipe
     # Intermediate or last command: read input from MPI pipe
     if chan_read:
@@ -71,15 +72,14 @@ def run_pipeline(context: str, event: str, chan_read: Queue,
     # First or intermediate command: write output to MPI pipe
     if chan_write:
         pipeline.commands.append(m42pl.command('mpi-send')(chan_write))
-    # ---
     # Rebuild and reconfigure pipeline
     pipeline.build()
     pipeline.set_chunk(chunk, chunks)
-    # ---
-    # Close stdout and run
+    # Close stdout
     if chan_write is not None:
         sys.stdout = DevNull()
         sys.stderr = DevNull()
+    # Run
     asyncio.run(run(pipeline, context, event))
 
 
@@ -92,8 +92,8 @@ class MPI(Dispatcher):
     TODO: Create a variant (e.g. `REPLMPI`) which will be more suitable
     for REPL application.
 
-    :ivar processes:    List of pipelines processes
-    :ivar modules:      M42PL modules paths and names
+    :ivar processes: List of pipelines processes
+    :ivar modules: M42PL modules paths and names
     """
 
     _aliases_ = ['multiprocessing', 'mpi']
@@ -133,15 +133,15 @@ class MPI(Dispatcher):
 
     def split_pipeline(self, pipeline: Pipeline,
                         max_layers: int = 2) -> List[Pipeline]:
-        """Splits the :param:`pipeline` by command type.
+        """Splits the given ``pipeline`` by command type.
 
-        The source :param:`pipeline` is split at each merging command
-        and in at most :param:`max_layers` layers.
+        The source ``pipeline`` is split at each ``MergincCommand``
+        and in at most ``max_layers`` layers.
 
-        :param pipeline:    Source pipeline
-        :param max_layers:  Maximum number of layers; Default to 2
-                            (one for pre-merging commands and one for 
-                            merging and post-merging commands)
+        :param pipeline: Source pipeline
+        :param max_layers: Maximum number of layers; Default to 2
+            (one for pre-merging commands and one for merging and
+            post-merging commands)
         """
         commands = [[],]
         pipelines = []
@@ -162,7 +162,7 @@ class MPI(Dispatcher):
             ))
         return pipelines
 
-    def target(self, context, event):
+    def target(self, context, event, plan):
         # ---
         # Get main pipeline
         main_pipeline = context.pipelines['main']
@@ -172,18 +172,39 @@ class MPI(Dispatcher):
         # ---
         # Create processes
         for layer, pipeline in enumerate(layers):
+
+            # ---
+            # Layering with Queue
+            # ---
+            # # Setup channels for first layer
+            # if layer == 0:
+            #     chan_read = None
+            #     chan_write = Queue()
+            # # Setup channels for intermediate layer
+            # elif layer > 0 and layer < (len(layers) - 1):
+            #     chan_read = chan_write
+            #     chan_write = Queue()
+            # # Setup channels for last layer
+            # else:
+            #     chan_read = chan_write
+            #     chan_write = None
+
+            # ---
+            # Layering with Pipes
+            # ---
             # Setup channels for first layer
             if layer == 0:
                 chan_read = None
-                chan_write = Queue()
+                pipe_read, chan_write = Pipe(duplex=False)
             # Setup channels for intermediate layer
             elif layer > 0 and layer < (len(layers) - 1):
-                chan_read = chan_write
-                chan_write = Queue()
+                chan_read = pipe_read
+                pipe_read, chan_write = Pipe(duplex=False)
             # Setup channels for last layer
             else:
-                chan_read = chan_write
+                chan_read = pipe_read
                 chan_write = None
+
             # Setup chunks count
             # `chunks` is the number of parallels pipelines to run.
             # If the `pipeline_count` is:
@@ -192,6 +213,14 @@ class MPI(Dispatcher):
             chunks = layer % 2 == 0 and self.max_cpus or 1
             # Amend context
             context.pipelines['main'] = pipeline
+            # Plan layer
+            self.plan.add_layer(f'L{layer}', kv={'chunks': chunks})
+            if chan_read:
+                self.plan.add_step('mpi-receive')
+            for command in pipeline.commands:
+                self.plan.add_step(command._aliases_[0])
+            if chan_write:
+                self.plan.add_step('mpi-send')
             # Setup layer's processes
             for chunk in range(0, chunks):
                 self.processes.append(Process(
@@ -207,14 +236,16 @@ class MPI(Dispatcher):
                         'modules': self.modules
                     }
                 ))
-        # ---
-        # Start processes
-        for process in self.processes:
-            process.start()
-        # ---
-        # Join processes
-        for process in self.processes:
-            process.join()
-        # ---
-        # Cleanup
-        self.processes = []
+
+        if not plan:
+            # ---
+            # Start processes
+            for process in self.processes:
+                process.start()
+            # ---
+            # Join processes
+            for process in self.processes:
+                process.join()
+            # ---
+            # Cleanup
+            self.processes = []
