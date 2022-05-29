@@ -4,9 +4,7 @@ import os
 import asyncio
 from pathlib import Path
 import multiprocessing
-# from pathos.multiprocessing import ProcessPool
 import dill
-import psutil
 
 from m42pl.pipeline import PipelineRunner
 from m42pl.dispatchers import Dispatcher
@@ -21,7 +19,7 @@ class LocalDispatcher(Dispatcher):
 
     _aliases_ = ['local',]
 
-    def __init__(self, workdir: str = '.', uv: bool = False,
+    def __init__(self, workdir: str = '.', uv: bool = True,
                     *args, **kwargs) -> None:
         """
         :param workdir: Working directory
@@ -55,16 +53,20 @@ class LocalDispatcher(Dispatcher):
             async with self:
                 self.current_kvstore = context.kvstore
                 self.current_identifier = os.getpid()
-                # Write pipeline / process ID to KVStore
-                # await self.register(context.kvstore, os.getpid())
-                await self.register(self.current_kvstore, self.current_identifier)
+                # Write pipeline process ID to KVStore
+                await self.register(
+                    self.current_kvstore,
+                    self.current_identifier
+                )
                 # Select and run pipeline
                 # try:
                 pipeline = context.pipelines['main']
                 runner = PipelineRunner(pipeline)
-                # async for _ in pipeline(context, event):
+                self.plan.layers[0].start()
                 async for _ in runner(context, event):
                     pass
+                # Update plan with execution time
+                self.plan.layers[0].stop()
                 # except (Exception, StopAsyncIteration):
                 #     # Remove pipeline / process ID from KVStore
                 #     await self.unregister(context.kvstore, os.getpid())
@@ -74,9 +76,10 @@ class LocalDispatcher(Dispatcher):
 
     def target(self, context, event, plan):
         # Plan
-        self.plan.add_layer('L0')
+        self.plan.add_layer()
+        self.plan.add_pipeline('main')
         for command in context.pipelines['main'].commands:
-            self.plan.add_step(command._aliases_[0])
+            self.plan.add_command(command._aliases_[0])
         # Run
         if not plan:
             os.chdir(self.workdir)

@@ -1,9 +1,10 @@
 import os
 import sys
 import json
-import multiprocessing
-from multiprocessing import Process, Queue, Pipe
 import asyncio
+from datetime import datetime
+import multiprocessing
+from multiprocessing import Process, Queue, Pipe, connection
 
 from typing import List
 
@@ -34,14 +35,15 @@ class DevNull:
 
 
 def run_pipeline(context: str, event: str, chan_read: Queue,
-                    chan_write: Queue, chunk: int, chunks: int,
-                    modules: dict):
+                    chan_write: Queue, layer: int, chunk: int,
+                    chunks: int, modules: dict, plan: bool):
     """Runs a split pipeline.
 
     :param context: Source context as JSON string
     :param event: Source event as JSON string
     :param chan_read: Multiprocessing queue output (read from);
     :param chan_write: Multiprocessing queue input (write to);
+    :param layer: Current layer number (starts at 0)
     :param chunk: Current chunk number (starts at 0)
     :param chunks: Total number of chunks (i.e. number of parallel
         pipelines / processes)
@@ -96,7 +98,7 @@ class MPI(Dispatcher):
     :ivar modules: M42PL modules paths and names
     """
 
-    _aliases_ = ['multiprocessing', 'mpi']
+    _aliases_ = ['mpi', 'multiprocessing']
 
     def __init__(self, background: bool = False, max_cpus: int = 0,
                     method: str = None, *args, **kwargs):
@@ -170,6 +172,9 @@ class MPI(Dispatcher):
         # Split main pipeline
         layers = self.split_pipeline(main_pipeline)
         # ---
+        # Plan data
+        plan_data = {}
+        # ---
         # Create processes
         for layer, pipeline in enumerate(layers):
 
@@ -204,6 +209,10 @@ class MPI(Dispatcher):
             else:
                 chan_read = pipe_read
                 chan_write = None
+            
+            # Cleanup the last layer chan_write
+            if layer == (len(layers) - 1):
+                chan_write = None
 
             # Setup chunks count
             # `chunks` is the number of parallels pipelines to run.
@@ -214,38 +223,55 @@ class MPI(Dispatcher):
             # Amend context
             context.pipelines['main'] = pipeline
             # Plan layer
-            self.plan.add_layer(f'L{layer}', kv={'chunks': chunks})
-            if chan_read:
-                self.plan.add_step('mpi-receive')
-            for command in pipeline.commands:
-                self.plan.add_step(command._aliases_[0])
-            if chan_write:
-                self.plan.add_step('mpi-send')
+            self.plan.add_layer()
             # Setup layer's processes
             for chunk in range(0, chunks):
-                self.processes.append(Process(
+                # Plan
+                self.plan.add_pipeline(f'{chunk}')
+                if chan_read:
+                    self.plan.add_command('mpi-receive')
+                for command in pipeline.commands:
+                    self.plan.add_command(command._aliases_[0])
+                if chan_write:
+                    self.plan.add_command('mpi-send')
+                # Process
+                self.processes.append((layer, chunk, Process(
                     target=run_pipeline,
                     kwargs={
                         'context': json.dumps(context.to_dict()),
-                        # 'event': json.dumps(event.to_dict()),
                         'event': json.dumps(event),
                         'chan_read': chan_read,
                         'chan_write': chan_write,
+                        'layer': layer,
                         'chunk': chunk,
                         'chunks': chunks,
-                        'modules': self.modules
+                        'modules': self.modules,
+                        'plan': plan,
                     }
-                ))
+                )))
 
         if not plan:
             # ---
             # Start processes
-            for process in self.processes:
+            for layer, chunk, process in self.processes:
                 process.start()
+                self.plan.layers[layer].pipelines[chunk].start_time = datetime.now()
             # ---
             # Join processes
-            for process in self.processes:
+            for layer, chunk, process in self.processes:
                 process.join()
+                self.plan.layers[layer].pipelines[chunk].stop_time = datetime.now()
             # ---
-            # Cleanup
-            self.processes = []
+            # Plan update
+            # for _, process in plan_data.items():
+            #     try:
+            #         print(process)
+            #         layer = self.plan.layers[process['layer']]
+            #         pipeline = layer.pipelines[process['chunk']]
+            #         pipeline.start_time = process['start_time']
+            #         pipeline.stop_time = process['stop_time']
+            #     except Exception:
+            #         raise
+        # ---
+        # Cleanup
+        self.processes = []
