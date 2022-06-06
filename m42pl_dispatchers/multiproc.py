@@ -65,15 +65,15 @@ def run_pipeline(context: str, event: str, chan_read: Queue,
     event = json.loads(event)
     # Get main pipeline
     pipeline = context.pipelines['main']
-    # Customize main pipeline to read & write to the multiprocessing pipe
-    # Intermediate or last command: read input from MPI pipe
+    # Customize main pipeline to read & write from/to the pipe
+    # Intermediate or last command: read input from pipe
     if chan_read:
         pipeline.commands = [
-            m42pl.command('mpi-receive')(chan_read),
+            m42pl.command('multiproc-receive')(chan_read),
         ] + pipeline.commands
-    # First or intermediate command: write output to MPI pipe
+    # First or intermediate command: write output to pipe
     if chan_write:
-        pipeline.commands.append(m42pl.command('mpi-send')(chan_write))
+        pipeline.commands.append(m42pl.command('multiproc-send')(chan_write))
     # Rebuild and reconfigure pipeline
     pipeline.build()
     pipeline.set_chunk(chunk, chunks)
@@ -85,32 +85,33 @@ def run_pipeline(context: str, event: str, chan_read: Queue,
     asyncio.run(run(pipeline, context, event))
 
 
-class MPI(Dispatcher):
+class Multiproc(Dispatcher):
     """Run pipelines in mutliple parallels processes (**not** threads).
 
     This dispatcher is not recomended for REPL application (although
     functionnal) as it `fork()` each time it is called.
 
-    TODO: Create a variant (e.g. `REPLMPI`) which will be more suitable
-    for REPL application.
+    TODO: Create a variant (e.g. `REPLMultipric`) which will be more
+    suitable for REPL application.
 
     :ivar processes: List of pipelines processes
     :ivar modules: M42PL modules paths and names
     """
 
-    _aliases_ = ['mpi', 'multiprocessing']
+    _aliases_ = ['multiproc', 'multiprocessing']
 
     def __init__(self, background: bool = False, max_cpus: int = 0,
-                    method: str = None, *args, **kwargs):
+                    strategy: str = 'collapse',
+                    method: str = None,*args, **kwargs):
         """
-        :param background:  True if the processes must be detached,
-                            False otherwise. Defaults to False
-        :param max_cpus:    Maximum number of CPU to use; Defaults to
-                            number of CPU
-        :param method:      Multiprocessing start method (`fork`,
-                            `forkserver` or `spawn`);
-                            If `None`, use default start method;
-                            Defaults to `None`
+        :param background: ``True`` if the processes must be detached,
+            ``False`` otherwise. Defaults to ``False``
+        :param max_cpus: Maximum number of CPUs to use; Defaults to
+            system's number of CPUs
+        :param strategy: Parallelizarion strategy
+        :param method: Multiprocessing start method (``fork``,
+            ``forkserver`` or ``spawn``); If ``None``, use default start
+            method; Defaults to `None`
         """
         super().__init__(*args, **kwargs)
         self.background = background
@@ -132,37 +133,6 @@ class MPI(Dispatcher):
                 'paths': [],
                 'names': []
             }
-
-    def split_pipeline(self, pipeline: Pipeline,
-                        max_layers: int = 2) -> List[Pipeline]:
-        """Splits the given ``pipeline`` by command type.
-
-        The source ``pipeline`` is split at each ``MergincCommand``
-        and in at most ``max_layers`` layers.
-
-        :param pipeline: Source pipeline
-        :param max_layers: Maximum number of layers; Default to 2
-            (one for pre-merging commands and one for merging and
-            post-merging commands)
-        """
-        commands = [[],]
-        pipelines = []
-        # Build the new pipelines' commands lists
-        for cmd in pipeline.commands:
-            # Split when the command type is a `MergingCommand`
-            if isinstance(cmd, MergingCommand) and len(commands) < max_layers:
-                commands.append([cmd,])
-            # Append non-merging command to current commands list
-            else:
-                commands[-1].append(cmd)
-        # Build and returns new pipelines
-        for cmds in commands:
-            pipelines.append(Pipeline(
-                commands=cmds,
-                name=f'{pipeline.name}',
-                # timeout=pipeline.timeout,
-            ))
-        return pipelines
 
     def target(self, context, event, plan):
         # ---
@@ -229,11 +199,11 @@ class MPI(Dispatcher):
                 # Plan
                 self.plan.add_pipeline(f'{chunk}')
                 if chan_read:
-                    self.plan.add_command('mpi-receive')
+                    self.plan.add_command('multiproc-receive')
                 for command in pipeline.commands:
                     self.plan.add_command(command._aliases_[0])
                 if chan_write:
-                    self.plan.add_command('mpi-send')
+                    self.plan.add_command('multiproc-send')
                 # Process
                 self.processes.append((layer, chunk, Process(
                     target=run_pipeline,
@@ -261,17 +231,6 @@ class MPI(Dispatcher):
             for layer, chunk, process in self.processes:
                 process.join()
                 self.plan.layers[layer].pipelines[chunk].stop_time = datetime.now()
-            # ---
-            # Plan update
-            # for _, process in plan_data.items():
-            #     try:
-            #         print(process)
-            #         layer = self.plan.layers[process['layer']]
-            #         pipeline = layer.pipelines[process['chunk']]
-            #         pipeline.start_time = process['start_time']
-            #         pipeline.stop_time = process['stop_time']
-            #     except Exception:
-            #         raise
         # ---
         # Cleanup
         self.processes = []
