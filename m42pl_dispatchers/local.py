@@ -6,6 +6,12 @@ from pathlib import Path
 import multiprocessing
 import dill
 
+try:
+    import uvloop
+    uvloop.install()
+except Exception:
+    pass
+
 from m42pl.pipeline import PipelineRunner
 from m42pl.dispatchers import Dispatcher
 import m42pl.errors
@@ -19,32 +25,26 @@ class LocalDispatcher(Dispatcher):
 
     _aliases_ = ['local',]
 
-    def __init__(self, workdir: str = '.', uv: bool = True,
-                    *args, **kwargs) -> None:
+    def __init__(self, workdir: str = '.', *args, **kwargs) -> None:
         """
         :param workdir: Working directory
-        :param uv: Set to ``True`` to use ``uvloop``
         :param timeout: Pipeline's timeout
         """
         super().__init__(*args, **kwargs)
         self.workdir = Path(workdir)
-        self.use_uv = uv
-        # ---
         if not self.workdir.is_dir():
             raise m42pl.errors.DispatcherError(
                 self, 
                 f'Requested workdir does not exists: workdir="{workdir}"'
             )
-        if self.use_uv:
-            import uvloop
-            uvloop.install()
-            self.logger.info('installed uvloop')
-        # ---
         self.current_kvstore = None
         self.current_identifier = None
 
     async def __aexit__(self, *args, **kwargs):
-        await self.unregister(self.current_kvstore, self.current_identifier)
+        await self.unregister(
+            self.current_kvstore,
+            self.current_identifier
+        )
 
     async def _run(self, context, event) -> None:
         """Run the context main pipeline.
@@ -59,20 +59,12 @@ class LocalDispatcher(Dispatcher):
                     self.current_identifier
                 )
                 # Select and run pipeline
-                # try:
                 pipeline = context.pipelines['main']
                 runner = PipelineRunner(pipeline)
                 self.plan.layers[0].start()
                 async for _ in runner(context, event):
                     pass
-                # Update plan with execution time
                 self.plan.layers[0].stop()
-                # except (Exception, StopAsyncIteration):
-                #     # Remove pipeline / process ID from KVStore
-                #     await self.unregister(context.kvstore, os.getpid())
-                #     raise
-                # # Remove pipeline / process ID from KVStore
-                # await self.unregister(context.kvstore, os.getpid())
 
     def target(self, context, event, plan):
         # Plan
@@ -130,7 +122,7 @@ class REPLLocalDispatcher(LocalDispatcher):
         pipeline = context.pipelines['main']
         # Add a trailing output command if necessary
         if not len(pipeline.commands) or not isinstance(pipeline.commands[-1], self.output_cmd):
-            pipeline.commands.append(self.output_cmd())
+            pipeline.commands.append(self.output_cmd(buffer=4096))
             pipeline.build()
         # Continue
         return super().target(context, event, plan)
@@ -158,7 +150,7 @@ class DetachedLocalDispatcher(LocalDispatcher):
     def target(self, context, event, plan) -> int:
         """Runs the pipeline in a new process.
 
-        :returns:   New process PID
+        :returns: New process PID
         """
         detached = multiprocessing.Process(
             target=self._detached_target,
@@ -170,20 +162,4 @@ class DetachedLocalDispatcher(LocalDispatcher):
         )
         detached.daemon = True
         detached.start()
-        # detached.join()
-        # print(detached)
-        # print(dir(detached))
         return detached.pid
-
-    # async def status(self, identifier: int|str) -> Dispatcher.State:
-    #     try:
-    #         status = psutil.Process(int(identifier)).status()
-    #         return {
-    #             psutil.STATUS_RUNNING: self.State.RUNNING,
-    #         }.get(status, self.State.UNKNOWN)
-    #     except Exception:
-    #         pass
-    #     return self.State.UNKNOWN
-
-    # async def status_str(self, identifier: int|str) -> Dispatcher.State:
-    #     return (await self.status(identifier)).name
