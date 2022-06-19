@@ -26,12 +26,14 @@ except Exception:
 
 
 class DevNull:
+    """Fake IO stream to discard everything.
+    """
+
     def write(self, *args, **kwargs):
         pass
 
     def flush(self, *args, **kwargs):
         pass
-
 
 
 def run_pipeline(context: str, event: str, chan_read: Queue,
@@ -91,7 +93,7 @@ class Multiproc(Dispatcher):
     This dispatcher is not recomended for REPL application (although
     functionnal) as it `fork()` each time it is called.
 
-    TODO: Create a variant (e.g. `REPLMultipric`) which will be more
+    TODO: Create a variant (e.g. `REPLMultiproc`) which will be more
     suitable for REPL application.
 
     :ivar processes: List of pipelines processes
