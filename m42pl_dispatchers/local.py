@@ -66,7 +66,7 @@ class LocalDispatcher(Dispatcher):
                     pass
                 self.plan.layers[0].stop()
 
-    def target(self, context, event, plan):
+    def target(self, context, event, plan: bool = False):
         # Plan
         self.plan.add_layer()
         self.plan.add_pipeline('main')
